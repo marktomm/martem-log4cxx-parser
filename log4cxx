@@ -1,0 +1,364 @@
+#!/bin/sh
+
+usage(){
+echo "SYNOPSIS:
+$0 -h,--help,--usage
+
+$0 -p,--port-debug [-v,--verbose] [-vv] 
+[-f,--file[=]LOGFILE_PATH(DEFAULT=/usr/local/etc/telem/log-conf.xml)]
+
+$0 -r,--remove-port-debug [-v,--verbose] [-vv] 
+[-f,--file[=]LOGFILE_PATH(DEFAULT=/usr/local/etc/telem/log-conf.xml)]
+
+$0 -R,--remove[=]PARENT_NAME [-v,--verbose] [-vv] 
+[-f,--file[=]LOGFILE_PATH(DEFAULT=/usr/local/etc/telem/log-conf.xml)]
+
+$0 -i,--info  |  -d,--debug  |  -t,--trace  |  -p,--priority-value[=]CUSTOM_PRIORITY_VALUE
+[ -l,--parent[=]PARENT_NAME(DEFAULT=root) ] [-v,--verbose] [-vv] 
+[-f,--file[=]LOGFILE_PATH(DEFAULT=/usr/local/etc/telem/log-conf.xml)] 
+
+$0 --param-name 'PARAM_NAME PARAM_VALUE' [ -l,--parent[=]PARENT_NAME(DEFAULT=root) ] 
+[-v,--verbose] [-vv] [-f,--file[=]LOGFILE_PATH(DEFAULT=/usr/local/etc/telem/log-conf.xml)]
+
+$0 -a,--append[=]FILE_NAME
+
+OPTIONS:
+
+-p, --port-debug
+	
+	enables port debugging (file port.xml must be in the same path as $0 or use -a, --append)
+	
+-r, --remove-port-debug
+
+	removes port debugging that was added from predefined port.xml file
+
+-i, --info
+	
+	change priority value to INFO in current parent (default=root)
+	
+-d, --debug
+	
+	change priority value to DEBUG in current parent (default=root)
+	
+-t, --trace
+	
+	change priority value to TRACE in current parent (default=root)
+	
+-p, --priority-value[=]VALUE
+	
+	set custom priority value to current parent (discards any -i -d -t arguments)
+	
+-l, --parent[=]PARENT_NAME (default=root)
+
+	make cahnges to logger/appender/parent wiht PARENT_NAME
+	
+--param_name 'PARAM_NAME PARAM_VALUE'
+
+	change param name=\"PARAM_NAME\" value field to PARAM_VALUE.
+	VALUES MUST BE BETWEEN QUOTES AND SEPARATED BY WHITESPACE.
+	
+-a, --append[=]FILE
+
+	append contents of FILE to LOGFILE_PATH right before \"</log4j:configuration>\"
+	
+-R, --remove[=]PARENT_NAME
+
+	remove appender/logger/parent from LOGFILE_PATH
+	
+-f, --file[=]FILE_NAME
+
+	set LOGFILE_PATH name (default=/usr/local/etc/telem/log-conf.xml)
+	
+-v, --verbose
+
+	get more info about what is happening (-vv for even more info)
+
+	
+EXAMPLE USAGE:
+
+log4cxx -tf /home/mark/log-conf.xml   (same as log4cxx -t -f /home/mark/log-conf.xml)
+
+	change <root> priority value \"TRACE\" in file /home/mark/log-conf.xml
+	
+	
+log4cxx -d   (same as log4cxx --debug)
+
+	change <root> priority value \"DEBUG\" in (default) file /usr/local/etc/telem/log-conf.xml
+
+	
+log4cxx -vvdf log-conf.xml
+
+	change <root> priority value to \"DEBUG\" in file log-conf.xml. Very verbose output.
+	
+
+log4cxx --parent GpsLog --param-name 'file /home/mark/file'
+
+	change GpsLog appender (logger/other type) \"file\" parameter value to \"/home/mark/file\"
+
+	
+log4cxx -vf log-conf.xml -l PortLog --param-name file /tmp/port
+
+	change param name=\"file\" value to \"/tmp/port\" in PortLog appender/logger/parent
+	in file log-conf.xml. verbose output.
+" >&2
+}
+
+ERROR=0
+logfile=/usr/local/etc/telem/log-conf.xml
+trace= debug= info= port= remove_port= parent=root custom_priority_value= param_name= param_val= verbose= change_to=INFO v_level=0 remove= to_remove=
+
+v_echo() { [[ "$verbose" -gt "0" ]] && command echo "$@" || return 0; }
+err_echo() { echo "$@" >&2 || return 0; ERROR=1; }
+
+append_file(){
+	[[ ! -f $1 ]] && {
+		err_echo "No such file $1"
+		return 1
+	}
+	
+	v_echo "Appending file $1 contents at the end of $logfile"
+	[[ v_level -gt 1 ]] && v_echo `cat $1`
+	
+	append_line_nr=`awk  '{ if($1=="</log4j:configuration>"){ print NR-1; exit } }' $logfile`
+	nr_of_lines=`wc -l $1 | awk '{ print $1 }'`
+	
+	v_echo "Appending to line: $append_line_nr"
+	
+	for i in `seq 1 $nr_of_lines`
+	do
+		sed -i "$append_line_nr,$append_line_nr s/\(.*\)/\1\n/" $logfile
+	done
+	
+	sed -i '/^ *$/d' $1
+	
+	while read line
+	do
+		line=${line//\"/\\\"}
+		line=${line//\//\\\/}
+		append_line_nr=$((append_line_nr+1))
+		[[ v_level -gt 1 ]] && v_echo "$line and $append_line_nr"
+		sed -i  "$append_line_nr,$((append_line_nr))s/.*/$line/" $logfile
+	done < $1
+}
+
+set_range(){
+	starting_line_nr=`grep -sn "<appender name=\"$1\"" $logfile | awk '{ print $1 }' | sed 's/\([0-9]*\).*/\1/'`
+	[[ -z $starting_line_nr ]] && starting_line_nr=`grep -sn "<logger name=\"$1\"" $logfile | awk '{ print $1 }' | sed 's/\([0-9]*\).*/\1/'` && end_tag="logger"  || end_tag="appender"
+	[[ -z $starting_line_nr ]] && starting_line_nr=`grep -sn "<$1>" $logfile | awk '{ print $1 }' | sed 's/\([0-9]*\).*/\1/'` && end_tag="$1" 
+	[[ -z $starting_line_nr ]] && err_echo "No such parent: $1" || v_echo "line nr found: $starting_line_nr, tag: $end_tag"
+	
+	ending_line_nr=`awk -v start="$starting_line_nr" -v tag="</$end_tag>" '{ if(NR > start){ if($1==tag){ print NR; exit } } }' $logfile`
+}
+
+params="$(getopt -o htdivPrR:a:p:l:f: -l append:,file:,level:,priority-value:,remove:,parent:,param-name:,usage,info,trace,debug,port-debug,remove-port-debug,verbose --name "$0" -- "$@")"
+eval set -- "$params"
+
+while true; do
+	case "$1" in
+		-t|--trace)
+			trace=1
+			change_to=TRACE
+			shift
+		;;
+		-i|--info)
+			info=1
+			change_to=INFO
+			shift
+		;;
+		-d|--debug)
+			debug=1
+			change_to=DEBUG
+			shift
+		;;
+		-p|--priority-value)
+			custom_priority_value=$2
+			shift
+			shift
+		;;
+		--param-name)
+			in=$2
+			param_name=${in% *}
+			param_val=${in#* }
+			shift
+			shift
+		;;
+		-P|--port-debug)
+			port=1
+			shift
+		;;
+		-r|--remove-port-debug)
+			remove_port=1
+			shift
+		;;
+		-R|--remove)
+			remove=1
+			to_remove=$2
+			shift
+			shift
+		;;
+		-a|--append)
+			append_file=$2
+			shift
+			shift
+		;;
+		-f|--file)
+			logfile=$2
+			shift
+			shift
+			
+		;;
+		-l|--parent)
+			parent=$2
+			shift
+			shift
+		;;
+		-v|--verbose)
+			verbose=1
+			v_level=$((v_level+1))
+			shift
+		;;
+		-h|--usage)
+			usage
+			exit 2
+		;;
+		--)
+			shift
+			break
+			;;
+		*)
+			echo "Not implemented: $1" >&2
+			exit 1
+			;;
+	esac
+done
+
+v_echo "Filename: $logfile"
+
+[[ ! -f "$logfile" ]] && {
+	err_echo "No such file $logfile"
+	exit 1
+}
+
+[[ ! -z "$append_file" ]] && {
+	append_file $append_file
+	[[ "$ERROR" -gt "0" ]] && exit 1
+	exit 0
+} 
+
+[[ ! -z "$port" ]] && {
+	v_echo "Enable Port debugging"
+	append_file "port.xml"
+	[[ "$ERROR" -gt "0" ]] && exit 1
+	exit 0
+}
+
+[[ ! -z "$remove_port" ]] && {
+	appender="PortLog"
+	logger="Gateway.PortCommentInConfiguration.port"
+	v_echo "Removing $appender appender"
+	
+	starting_line_nr=`grep -sn "<appender name=\"$appender\"" $logfile | awk '{ print $1 }' | sed 's/\([0-9]*\).*/\1/'`
+	end_tag="appender"
+	[[ -z $starting_line_nr ]] && v_echo "No such parent: $appender. Moving to $logger" || v_echo "line nr found: $starting_line_nr, tag: $end_tag"
+		
+	[[ ! -z "$starting_line_nr" ]] && {
+		ending_line_nr=`awk -v start="$starting_line_nr" -v tag="</$end_tag>" '{ if(NR > start){ if($1==tag){ print NR; exit } } }' $logfile`
+		
+		v_echo "Deleting form line nr: $starting_line_nr, stoping at line nr: $ending_line_nr"
+
+		
+		for i in `seq $starting_line_nr $ending_line_nr`
+		do
+			sed -i "$starting_line_nr d" $logfile
+		done
+	}
+	
+	v_echo "Removing $logger logger"
+	
+	starting_line_nr=`grep -sn "<logger name=\"$logger\"" $logfile | awk '{ print $1 }' | sed 's/\([0-9]*\).*/\1/'`
+	end_tag="logger"
+	[[ -z $starting_line_nr ]] && err_echo "No such parent: $logger" || v_echo "line nr found: $starting_line_nr, tag: $end_tag"
+	
+	[[ "$ERROR" -gt "0" ]] && exit 1
+	
+	ending_line_nr=`awk -v start="$starting_line_nr" -v tag="</$end_tag>" '{ if(NR > start){ if($1==tag){ print NR; exit } } }' $logfile`
+	
+	v_echo "Deleting form line nr: $starting_line_nr, stoping at line nr: $ending_line_nr"
+	
+	for i in `seq $starting_line_nr $ending_line_nr`
+	do
+		sed -i "$starting_line_nr d" $logfile
+	done
+	
+	exit 0
+}
+
+[[ ! -z "$remove" ]] && {
+	v_echo "Removing $to_remove"
+	
+	set_range $to_remove
+	
+	[[ "$ERROR" -gt "0" ]] && exit 1
+	
+	v_echo "Deleting form line nr: $starting_line_nr, stoping at line nr: $ending_line_nr"
+	
+	for i in `seq $starting_line_nr $ending_line_nr`
+	do
+		sed -i "$starting_line_nr d" $logfile
+	done
+	
+	exit 0
+}
+
+[[ ! -z "$custom_priority_value" ]] && {
+	v_echo "Custom priority value $custom_priority_value. Any other priority value arguments ( d t i ) will be ignored"
+	trace= debug= info=
+	change_to="$custom_priority_value"
+}
+
+[[ ! -z "$trace" ]] || [[ ! -z "$debug" ]] || [[ ! -z "$info" ]] || [[ ! -z "$custom_priority_value" ]] && {
+	v_echo "Parent: $parent"
+	v_echo "Changing priority value to: $change_to"
+	
+	set_range $parent
+	
+	[[ "$ERROR" -gt "0" ]] && exit 1
+	
+	v_echo "Parsing form line nr: $starting_line_nr, stoping at line nr: $ending_line_nr"
+	
+	old_val=`sed -n "$starting_line_nr,$((ending_line_nr))s/ *<priority value=\"\([^ ]*\)\".*\/>/\1/p" $logfile`
+	[[ -z "$old_val" ]] && err_echo "No priority value in current parent"
+	
+	[[ "$ERROR" -gt "0" ]] && exit 1
+	
+	v_echo "Old priority value: $old_val"
+	sed -i "$starting_line_nr,$((ending_line_nr))s/<priority value=\".*\"/<priority value=\"$change_to\"/g" $logfile
+	
+	exit 0
+}
+
+[[ ! -z "$param_name" ]] && [[ ! -z "$param_val" ]] && {
+	v_echo "Parent: $parent"
+	v_echo "Changing param: $param_name to value: $param_val"
+	
+	set_range $parent
+	
+	[[ "$ERROR" -gt "0" ]] && exit 1
+	
+	v_echo "Parsing form line nr: $starting_line_nr, stoping at line nr: $ending_line_nr"
+	
+	old_val=`sed -n "$starting_line_nr,$((ending_line_nr))s/ *<param name=\"$param_name\" *value=\"\([^ ]*\)\".*\/>/\1/p" $logfile`
+	[[ -z "$old_val" ]] && err_echo "No $param_name in $parent"
+	
+	[[ "$ERROR" -gt "0" ]] && exit 1
+	
+	v_echo "Old $param_name value: $old_val"
+	
+	sed -i  "$starting_line_nr,$((ending_line_nr))s/<param name=\"$param_name\" value=\".*\"/<param name=\"$param_name\" value=\"$param_val\"/g" $logfile
+	
+	exit 0
+}
+
+err_echo "Not enough arguments. Nothing to do."
+[[ "$ERROR" -gt "0" ]] && exit 1
+exit 3
